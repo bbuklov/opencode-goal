@@ -2,6 +2,16 @@
 
 All notable changes to **OpenCode Goals** are documented here.
 
+## Unreleased
+
+OpenCode 2 TUI plugin compatibility fix.
+
+- Make the dedicated `@bybrawe/opencode-goal/tui` entry dual-contract: OpenCode 1.x continues to use `tui(api)`, while OpenCode 2.x now loads the same module through `Plugin.define({ id, setup })` from `@opencode/plugin/tui`. Previously the V1-only shape was rejected by the OpenCode 2 host with `Invalid V2 TUI plugin module`, so the sidebar never mounted.
+- Re-register the Goals sidebar through the V2 slot API (`append: "sidebar.content"`) and preserve the existing reactive behavior: the render body intentionally touches host session status/message state so normal transitions re-evaluate the read-only filesystem projection, and goal data is still read only from the session project directory.
+- Render through `@opentui/solid/jsx-runtime` with hand-written getter children so plain `tsc` output keeps Solid's lazy child semantics (a stock react-jsx transform would evaluate children eagerly and freeze the sidebar).
+- Ship `@opencode/plugin`, `@opentui/solid`, and `solid-js` as production dependencies because `dist/tui` imports them at runtime and OpenCode installs npm plugins into an isolated production cache; extend packed-package smoke coverage so the `./tui` export must expose both the OpenCode 2 `setup` function and the legacy 1.x `tui` function.
+- Verified against OpenCode 2.0.15: package smoke passes in a clean production-only consumer, and a real host reaches active plugin state for both the server and TUI halves with no plugin errors.
+
 ## 1.3.36 — 2026-09-21
 
 Goal lifecycle notification release.
