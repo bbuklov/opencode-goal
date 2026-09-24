@@ -100,6 +100,18 @@ async function withDirectLifecyclePreview(fn) {
   }
 }
 
+async function withoutDirectLifecyclePreview(fn) {
+  const key = OPENCODE2_DIRECT_LIFECYCLE_ENV
+  const previous = process.env[key]
+  delete process.env[key]
+  try {
+    return await fn()
+  } finally {
+    if (previous === undefined) delete process.env[key]
+    else process.env[key] = previous
+  }
+}
+
 function requestTools() {
   return {
     opencode_goals_v2_control: { description: "stale control" },
@@ -184,25 +196,27 @@ async function consumeCapability(host, sessionID, command, agent = "build") {
 test("experimental V2 plugin registers read-only inspection without command wrapping or mutating control", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "opencode-goals-v2-readonly-"))
   try {
-    const host = fakeV2Context(root)
-    assert.equal(OpenCode2GoalsExperimental.id, OPENCODE2_EXPERIMENTAL_PLUGIN_ID)
-    const cleanup = await OpenCode2GoalsExperimental.setup(host.ctx)
+    await withoutDirectLifecyclePreview(async () => {
+      const host = fakeV2Context(root)
+      assert.equal(OpenCode2GoalsExperimental.id, OPENCODE2_EXPERIMENTAL_PLUGIN_ID)
+      const cleanup = await OpenCode2GoalsExperimental.setup(host.ctx)
 
-    assert.equal(host.commandTransformCalls(), 0, "read-only V2 adapter must not wrap model-visible command text")
-    assert.equal(host.commands.size, 0)
-    assert.equal(host.tools.has("opencode_goals_v2_control"), false)
-    assert.equal(host.tools.get("opencode_goals_v2_get")?.options?.codemode, false)
-    assert.equal(typeof host.tools.get("opencode_goals_v2_get")?.definition?.execute, "function")
-    assert.equal(typeof host.hooks.get("context"), "function")
-    assert.equal(typeof host.hooks.get("request"), "function")
-    assert.equal(typeof cleanup, "function")
-    cleanup()
+      assert.equal(host.commandTransformCalls(), 0, "read-only V2 adapter must not wrap model-visible command text")
+      assert.equal(host.commands.size, 0)
+      assert.equal(host.tools.has("opencode_goals_v2_control"), false)
+      assert.equal(host.tools.get("opencode_goals_v2_get")?.options?.codemode, false)
+      assert.equal(typeof host.tools.get("opencode_goals_v2_get")?.definition?.execute, "function")
+      assert.equal(typeof host.hooks.get("context"), "function")
+      assert.equal(typeof host.hooks.get("request"), "function")
+      assert.equal(typeof cleanup, "function")
+      cleanup()
+    })
   } finally {
     await rm(root, { recursive: true, force: true })
   }
 })
 
-test("V2 status and contract stay readable while every lifecycle mutation fails closed", async () => {
+test("V2 status, contract, and audit stay readable while every lifecycle mutation fails closed", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "opencode-goals-v2-readonly-control-"))
   try {
     const host = fakeV2Context(root)
@@ -218,6 +232,13 @@ test("V2 status and contract stay readable while every lifecycle mutation fails 
     assert.match(contract.content, /OpenCode Goals contract/)
     assert.match(contract.content, /docs match shipped behavior/)
     assert.match(contract.content, /no unrelated mutation/)
+
+    const audit = await executeOpenCode2GoalControl(host.ctx, "audit", { sessionID, agent: "build" })
+    assert.match(audit.content, /Goal Audit/)
+    assert.match(audit.content, /Objective: ship docs/)
+    assert.match(audit.content, /Completion gate: NOT READY/)
+    assert.match(audit.content, /read-only snapshot/i)
+    assert.deepEqual(await new GoalStore(root).load(sessionID), before, "audit must not mutate Goal state")
 
     const get = await host.tools.get("opencode_goals_v2_get").definition.execute(
       {},
@@ -322,6 +343,31 @@ test("V2 direct lifecycle preview registers host command and mutating tool only 
       assert.equal(typeof host.commands.get("goal")?.execute, "function")
       assert.equal(typeof host.tools.get("opencode_goals_v2_control")?.definition?.execute, "function")
       assert.equal(typeof host.tools.get("opencode_goals_v2_get")?.definition?.execute, "function")
+    })
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test("direct lifecycle preview serves audit as a read-only host command without minting a mutation capability", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "opencode-goals-v2-direct-audit-"))
+  try {
+    await withDirectLifecyclePreview(async () => {
+      const host = fakeV2Context(root)
+      const sessionID = "v2-direct-audit"
+      const before = await seedGoal(root, sessionID, "ship audited docs")
+      await OpenCode2GoalsExperimental.setup(host.ctx)
+
+      const result = await dispatchDirectCommand(host, sessionID, "audit")
+      assert.equal(result.messageID, undefined, "read-only audit must not admit a lifecycle capability message")
+      assert.equal(result.emitted.length, 1)
+      assert.equal(result.emitted[0].resume, true)
+      assert.equal(result.emitted[0].metadata?.opencode_goal_v2_direct_command, true)
+      assert.equal(result.emitted[0].metadata?.opencode_goal_v2_read_only, true)
+      assert.match(result.emitted[0].text, /Goal Audit/)
+      assert.match(result.emitted[0].text, /Objective: ship audited docs/)
+      assert.match(result.emitted[0].text, /respond with this information only/i)
+      assert.deepEqual(await new GoalStore(root).load(sessionID), before, "direct audit must not mutate Goal state")
     })
   } finally {
     await rm(root, { recursive: true, force: true })

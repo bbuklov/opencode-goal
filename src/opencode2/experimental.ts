@@ -4,6 +4,7 @@ import type { GoalState } from "../domain/types.js"
 import { GoalStore } from "../persistence/store.js"
 import { applyGoalBudget, budgetLimitHits } from "../runtime/accounting.js"
 import { formatGoalRuntimeFingerprint } from "../runtime/fingerprint.js"
+import { formatGoalAudit } from "../opencode/audit-ux.js"
 import { parseGoalCommand } from "../opencode/command.js"
 import { createGoalTransitionNotifier } from "../opencode/notify.js"
 import { continuationPrompt } from "../opencode/prompt.js"
@@ -190,7 +191,7 @@ function directLifecyclePreviewEnabled(): boolean {
 
 const DIRECT_CAPABILITY_TTL_MS = 2 * 60_000
 const DIRECT_MUTATION_ACTIONS = new Set(["create", "edit", "pause", "resume", "clear"])
-const DIRECT_READ_ACTIONS = new Set(["status", "contract"])
+const DIRECT_READ_ACTIONS = new Set(["status", "contract", "audit"])
 
 export interface OpenCode2DirectCapability {
   sessionID: string
@@ -325,7 +326,7 @@ async function promptDirectReadOnly(
   })
 }
 
-function readOnlyCommandPrompt(kind: "status" | "contract", text: string): string {
+function readOnlyCommandPrompt(kind: "status" | "contract" | "audit", text: string): string {
   return [
     text,
     "",
@@ -500,6 +501,10 @@ export async function executeOpenCode2DirectGoalCommand(
     await promptDirectReadOnly(ctx, input, readOnlyCommandPrompt("contract", formatContract(goal)))
     return { action: parsed.action, goal, dispatched: false }
   }
+  if (parsed.action === "audit") {
+    await promptDirectReadOnly(ctx, input, readOnlyCommandPrompt("audit", formatGoalAudit(goal)))
+    return { action: parsed.action, goal, dispatched: false }
+  }
 
   if ((parsed.action === "create" || parsed.action === "edit") && !parsed.objective) {
     throw new Error('Usage: /goal <objective> [--accept "criterion"] [--check "command"]')
@@ -573,8 +578,8 @@ export async function executeOpenCode2DirectGoalCommand(
 
 /**
  * Read-only compatibility entrypoint retained for experimental consumers.
- * Only status/contract reads are permitted until the real OpenCode 2 host can
- * prove command origin and request-time plugin tool materialization. All
+ * Only status/contract/audit reads are permitted until the real OpenCode 2 host
+ * can prove command origin and request-time plugin tool materialization. All
  * lifecycle mutations fail closed without writing Goal state.
  */
 export async function executeOpenCode2GoalControl(
@@ -590,6 +595,7 @@ export async function executeOpenCode2GoalControl(
 
   if (parsed.action === "status") return toolResponse(formatStatus(goal), goal)
   if (parsed.action === "contract") return toolResponse(formatContract(goal), goal)
+  if (parsed.action === "audit") return toolResponse(formatGoalAudit(goal), goal)
   return toolResponse(V2_READ_ONLY_NOTICE, goal)
 }
 

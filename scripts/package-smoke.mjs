@@ -149,8 +149,9 @@ async function main() {
       const toolModule = await import("@opencode-ai/plugin/tool");
       if (typeof toolModule.tool !== "function") throw new Error("runtime OpenCode tool dependency is missing");
       const tui = await import("@bybrawe/opencode-goal/tui");
-      if (typeof tui.default?.tui !== "function") throw new Error("TUI plugin export is missing");
       if (tui.default?.id !== "opencode-goal") throw new Error("TUI plugin id is incorrect");
+      if (typeof tui.default?.setup !== "function") throw new Error("TUI plugin OpenCode 2 setup export is missing");
+      if (typeof tui.default?.tui !== "function") throw new Error("TUI plugin OpenCode 1.x export is missing");
       const entryDir = path.dirname(fileURLToPath(import.meta.resolve("@bybrawe/opencode-goal")));
       if (!fs.existsSync(path.join(entryDir, "index.d.ts"))) throw new Error("published type declarations are missing");
       console.log("consumer import ok");
