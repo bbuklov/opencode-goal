@@ -4,7 +4,9 @@ All notable changes to **OpenCode Goals** are documented here.
 
 ## Unreleased
 
-OpenCode 2 TUI plugin compatibility fix.
+OpenCode 2 Goal audit and TUI plugin compatibility fix.
+
+- Port `/goal audit` to the experimental OpenCode 2 direct-command path as a read-only inspection command. The V2 adapter now returns the existing Goal audit snapshot through both the host-native direct command preview and the read-only compatibility entrypoint, without minting a lifecycle mutation capability or changing persisted Goal state.
 
 - Make the dedicated `@bybrawe/opencode-goal/tui` entry dual-contract: OpenCode 1.x continues to use `tui(api)`, while OpenCode 2.x now loads the same module through `Plugin.define({ id, setup })` from `@opencode/plugin/tui`. Previously the V1-only shape was rejected by the OpenCode 2 host with `Invalid V2 TUI plugin module`, so the sidebar never mounted.
 - Re-register the Goals sidebar through the V2 slot API (`append: "sidebar.content"`) and preserve the existing reactive behavior: the render body intentionally touches host session status/message state so normal transitions re-evaluate the read-only filesystem projection, and goal data is still read only from the session project directory.

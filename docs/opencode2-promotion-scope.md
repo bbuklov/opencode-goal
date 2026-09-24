@@ -9,7 +9,7 @@ On exact OpenCode 2.0.11, the experimental direct lifecycle preview may cover:
 - host-native direct `/goal` command origin;
 - host user-message identity;
 - bounded, single-use lifecycle capability exposure;
-- create, status, contract, pause, resume, edit, and clear persistence;
+- create, pause, resume, edit, and clear persistence plus status, contract, and audit read-only inspection;
 - mismatch, spoof, replay, Plan/read-only, and Location fail-closed behavior;
 - continued read-only Goal inspection after mutating capability consumption.
 
