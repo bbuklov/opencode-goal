@@ -2,6 +2,15 @@
 
 All notable changes to **OpenCode Goals** are documented here.
 
+## 1.3.37-bbuklov.1 — 2026-10-12
+
+Private fork fix for concurrent state updates during Goal-owned compaction.
+
+- Retry bounded stale-generation conflicts using freshly loaded Goal state before continuation and pure accounting/context transitions.
+- Preserve concurrent pause/edit decisions and publish continuation ownership only after a successful current-state commit.
+- Keep a failed compaction wake-up retryable and emit a diagnostic instead of silently losing the fallback.
+- Add deterministic regressions over the real wrapper stack, including contention with host-limit context reset and compaction during an unresolved synchronous prompt.
+
 ## 1.3.36 — 2026-09-21
 
 Goal lifecycle notification release.

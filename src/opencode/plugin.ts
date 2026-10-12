@@ -111,6 +111,29 @@ export default async function OpenCodeGoalPlugin(input: any, options: OpenCodeGo
   async function load(sessionID: string) { return await store.load(sessionID) }
   async function save(goal: GoalState) { await store.save(goal); return goal }
 
+  // Core serialization does not cover outer wrappers or another host process.
+  // Retry only pure state transitions, re-reading status/ownership each time;
+  // publish in-memory effects only after the compare-and-swap succeeds.
+  async function mutateFreshGoal(sessionID: string, mutate: (goal: GoalState) => GoalState | null): Promise<GoalState | null> {
+    let lastStale: GoalStoreConcurrencyError | undefined
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      const current = await load(sessionID)
+      if (!current) return null
+      const next = mutate(current)
+      if (!next) return null
+      try {
+        return await save(next)
+      } catch (error) {
+        if (error instanceof GoalStoreConcurrencyError && error.kind === "stale_write") {
+          lastStale = error
+          continue
+        }
+        throw error
+      }
+    }
+    throw lastStale ?? new Error("Goal state kept changing while applying core transition")
+  }
+
   function resetCadenceTurn(sessionID: string) {
     cadenceMutationReservations.delete(sessionID)
   }
@@ -217,11 +240,18 @@ export default async function OpenCodeGoalPlugin(input: any, options: OpenCodeGo
         deferredIdle.add(sessionID)
         return null
       }
-      let goal = await load(sessionID)
-      if (!goal || goal.status !== "active") return null
-      goal = closeObservedTurn(goal)
-      await save(goal)
-      if (goal.status !== "active") return null
+      let expectedOwner: ReturnType<typeof goalTurnOwner> | undefined
+      const settled = await mutateFreshGoal(sessionID, (latest) => {
+        if (latest.status !== "active") return null
+        expectedOwner ??= goalTurnOwner(latest)
+        if (!sameGoalTurn(expectedOwner, goalTurnOwner(latest))) return null
+        return closeObservedTurn(latest)
+      })
+      if (!settled || settled.status !== "active") return null
+      // A competing pause/edit may have followed our successful save. Never
+      // dispatch the old objective or take ownership of a replacement Goal.
+      const goal = await load(sessionID)
+      if (!goal || goal.status !== "active" || !sameGoalTurn(expectedOwner, goalTurnOwner(goal))) return null
       resetCadenceTurn(sessionID)
       const token = Date.now() + Math.random()
       const text = continuationPrompt(goal)
@@ -237,15 +267,23 @@ export default async function OpenCodeGoalPlugin(input: any, options: OpenCodeGo
     void sdkPrompt(client, sessionID, prepared.text, prepared.goal.execution)
       .catch(async (error) => {
         await serialize(sessionID, async () => {
-          const latest = await load(sessionID)
-          if (latest?.status === "active" && dispatching.get(sessionID) === prepared.token) {
-            await save(pauseGoal(latest, `Continuation dispatch failed: ${String(error)}`))
-          }
+          await mutateFreshGoal(sessionID, (latest) => {
+            if (latest.status !== "active" || dispatching.get(sessionID) !== prepared.token ||
+                !sameGoalTurn(goalTurnOwner(prepared.goal), goalTurnOwner(latest))) return null
+            return pauseGoal(latest, `Continuation dispatch failed: ${String(error)}`)
+          })
         })
       })
       .finally(() => {
         if (dispatching.get(sessionID) === prepared.token) dispatching.delete(sessionID)
-        if (deferredIdle.delete(sessionID)) queueMicrotask(() => { void continueIfActive(sessionID) })
+        if (deferredIdle.delete(sessionID)) queueMicrotask(() => {
+          void continueIfActive(sessionID).catch((error) => {
+            console.error(`[opencode-goal] Deferred continuation failed for ${sessionID}; a fresh idle can retry: ${String(error)}`)
+          })
+        })
+      })
+      .catch((error) => {
+        console.error(`[opencode-goal] Continuation cleanup failed for ${sessionID}: ${String(error)}`)
       })
   }
 
@@ -356,17 +394,17 @@ export default async function OpenCodeGoalPlugin(input: any, options: OpenCodeGo
       if (owned) {
         if (owned.owner && Object.keys(context).length) {
           await serialize(event.sessionID, async () => {
-            const goal = await load(event.sessionID)
-            if (goal && goal.status !== "completed" && sameGoalTurn(owned.owner, goalTurnOwner(goal))) {
-              await save({
+            await mutateFreshGoal(event.sessionID, (goal) => {
+              if (goal.status === "completed" || !sameGoalTurn(owned.owner, goalTurnOwner(goal))) return null
+              return {
                 ...goal,
                 execution: {
                   ...context,
                   ...(goal.execution?.modelContext ? { modelContext: goal.execution.modelContext } : {}),
                 },
                 updatedAt: Date.now(),
-              })
-            }
+              }
+            })
           })
         }
         return
@@ -397,14 +435,15 @@ export default async function OpenCodeGoalPlugin(input: any, options: OpenCodeGo
 
     "chat.params": async (event: any) => {
       await serialize(event.sessionID, async () => {
-        const goal = await load(event.sessionID)
-        if (!goal || goal.status === "completed") return
-        const next = observeModelContextLimits(goal, {
-          model: event.model,
-          autoCompaction: hostAutoCompaction,
-          ...(hostCompactionReserved !== undefined ? { compactionReserved: hostCompactionReserved } : {}),
+        await mutateFreshGoal(event.sessionID, (goal) => {
+          if (goal.status === "completed") return null
+          const next = observeModelContextLimits(goal, {
+            model: event.model,
+            autoCompaction: hostAutoCompaction,
+            ...(hostCompactionReserved !== undefined ? { compactionReserved: hostCompactionReserved } : {}),
+          })
+          return next === goal ? null : next
         })
-        if (next !== goal) await save(next)
       })
     },
 
@@ -520,8 +559,6 @@ export default async function OpenCodeGoalPlugin(input: any, options: OpenCodeGo
           if (owner) {
             let emptyNotice: { count: number; paused: boolean } | undefined
             await serialize(sessionID, async () => {
-              const goal = await load(sessionID)
-              if (!goal || owner.goalID !== goal.id || goal.usage.seenMessageIDs.includes(info.id)) return
               const sample = {
                 messageID: info.id,
                 inputTokens: info.tokens?.input,
@@ -531,17 +568,24 @@ export default async function OpenCodeGoalPlugin(input: any, options: OpenCodeGo
                 createdAt: info.time?.created,
                 completedAt: info.time?.completed,
               }
-              const currentRevision = sameGoalTurn(owner, goalTurnOwner(goal))
-              let next: GoalState
-              if (!meaningful && currentRevision && goal.status === "active") {
-                next = recordEmptyAssistantTurn(goal, sample)
-                emptyNotice = { count: next.emptyTurnCount ?? 0, paused: next.status === "paused" }
-              } else {
-                next = accountAssistantUsage(goal, sample)
-                if (meaningful && currentRevision) next = clearEmptyAssistantTurnStreak(next)
+              let emptyAttempt = false
+              const saved = await mutateFreshGoal(sessionID, (goal) => {
+                emptyAttempt = false
+                if (owner.goalID !== goal.id || goal.usage.seenMessageIDs.includes(info.id)) return null
+                const currentRevision = sameGoalTurn(owner, goalTurnOwner(goal))
+                let next: GoalState
+                if (!meaningful && currentRevision && goal.status === "active") {
+                  emptyAttempt = true
+                  next = recordEmptyAssistantTurn(goal, sample)
+                } else {
+                  next = accountAssistantUsage(goal, sample)
+                  if (meaningful && currentRevision) next = clearEmptyAssistantTurnStreak(next)
+                }
+                return observeModelContextUsage(next, info.tokens)
+              })
+              if (saved && emptyAttempt) {
+                emptyNotice = { count: saved.emptyTurnCount ?? 0, paused: saved.status === "paused" }
               }
-              next = observeModelContextUsage(next, info.tokens)
-              await save(next)
             })
             if (emptyNotice) {
               const message = emptyNotice.paused

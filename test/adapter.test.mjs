@@ -361,6 +361,10 @@ test("active goal owns compaction context and generic auto-continue", async () =
     const auto = { enabled: true }
     await hooks["experimental.compaction.autocontinue"]({ sessionID: "session-1" }, auto)
     assert.equal(auto.enabled, false)
+    // Wait for the detached compaction fallback before deleting its GoalStore.
+    await waitFor(() => fake.promptCount === 1)
+    fake.pending[0].resolve({})
+    await tick()
   } finally {
     await rm(root, { recursive: true, force: true })
   }

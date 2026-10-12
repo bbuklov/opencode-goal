@@ -64,7 +64,10 @@ export function installGoalCompactionContinuation(input: PluginInput, hooks: Plu
     try {
       await eventHook(eventInput)
     } catch (error) {
-      if (states.get(sessionID) === current) clear(sessionID)
+      // A bounded core CAS retry may still exhaust under contention. Preserve
+      // the one-shot wake-up for the next real idle instead of losing it. There
+      // is no timer retry loop and no ownership is claimed after a failed write.
+      if (states.get(sessionID) === current) current.phase = "pending"
       throw error
     }
 
@@ -90,9 +93,10 @@ export function installGoalCompactionContinuation(input: PluginInput, hooks: Plu
             [COMPACTION_CONTINUATION_MARKER]: token,
           },
         },
-      }).catch(() => {
+      }).catch((error) => {
         const latest = states.get(sessionID)
-        if (latest?.token === token) clear(sessionID)
+        if (latest?.token === token && latest.phase === "dispatching") latest.phase = "pending"
+        console.error(`[opencode-goal] Post-compaction continuation failed for ${sessionID}; the next safe idle can retry: ${String(error)}`)
       })
     })
   }
