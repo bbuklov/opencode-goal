@@ -2,6 +2,14 @@
 
 All notable changes to **OpenCode Goals** are documented here.
 
+## 1.3.37-bbuklov.2 — 2026-10-13
+
+Provider usage-limit classification fix.
+
+- Classify explicit quota exhaustion from API error messages and response bodies before fatal authorization errors, including Kimi's HTTP 403 five-hour limit.
+- Preserve ordinary invalid-key/access-denied errors and manual/budget pauses; clear obsolete infrastructure retry state when entering usage-limited.
+- Add regressions for provider quota response shapes and unchanged authorization handling.
+
 ## 1.3.37-bbuklov.1 — 2026-10-12
 
 Private fork fix for concurrent state updates during Goal-owned compaction.

@@ -234,3 +234,69 @@ test("budget command can clear limits and status shows used versus allowed value
     await removeTempRoot(root)
   }
 })
+
+for (const [name, data] of [
+  ["Kimi 403 message", { providerID: "kimi-code-plan-cn", statusCode: 403, isRetryable: false, message: "You've reached your 5-hour usage limit. Your quota will reset when the current 5-hour window ends." }],
+  ["Kimi 403 response body", { providerID: "kimi-code-plan-cn", statusCode: 403, isRetryable: false, message: "Forbidden", responseBody: JSON.stringify({ error: { message: "You've reached your 5-hour usage limit. Your quota will reset when the current 5-hour window ends." } }) }],
+  ["quota 429", { statusCode: 429, isRetryable: false, message: "usage quota exhausted" }],
+]) {
+  test(`explicit provider quota from ${name} becomes usage_limited without autonomous idle retry`, async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "opencode-goal-api-quota-"))
+    try {
+      const fake = fakeClient()
+      const hooks = await OpenCodeGoalPlugin({ client: fake.client, directory: root })
+      await createAndOwn(hooks, "ship release --max-turns 20")
+      const before = await readGoal(root)
+      await hooks.event({ event: { type: "session.error", properties: { sessionID: "s1", error: { name: "APIError", data } } } })
+      const limited = await readGoal(root)
+      assert.equal(limited.status, "usage_limited")
+      assert.match(limited.stopReason, /provider usage limit/)
+      assert.equal(limited.infrastructureRecovery, undefined)
+      assert.deepEqual(limited.budget, before.budget)
+      assert.deepEqual(limited.usage, before.usage)
+      assert.equal(fake.abortCount, 1)
+      await hooks.event({ event: { type: "session.idle", properties: { sessionID: "s1" } } })
+      assert.equal(fake.prompts.length, 0)
+      assert.equal((await readGoal(root)).status, "usage_limited")
+    } finally {
+      await removeTempRoot(root)
+    }
+  })
+}
+
+test("ordinary HTTP 403 stays a fatal pause, never a quota-reset wait", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "opencode-goal-forbidden-"))
+  try {
+    const fake = fakeClient()
+    const hooks = await OpenCodeGoalPlugin({ client: fake.client, directory: root })
+    await createAndOwn(hooks)
+    await hooks.event({ event: { type: "session.error", properties: { sessionID: "s1", error: { name: "APIError", data: { statusCode: 403, isRetryable: false, message: "Forbidden: invalid API key" } } } } })
+    const goal = await readGoal(root)
+    assert.equal(goal.status, "paused")
+    assert.match(goal.stopReason, /HTTP 403.*invalid API key/)
+    assert.equal(fake.abortCount, 1)
+    await hooks.event({ event: { type: "session.idle", properties: { sessionID: "s1" } } })
+    assert.equal(fake.prompts.length, 0)
+  } finally {
+    await removeTempRoot(root)
+  }
+})
+
+test("quota error cannot replace an explicit user pause", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "opencode-goal-paused-quota-"))
+  try {
+    const fake = fakeClient()
+    const hooks = await OpenCodeGoalPlugin({ client: fake.client, directory: root })
+    await createAndOwn(hooks)
+    await hooks["command.execute.before"]({ command: "goal", sessionID: "s1", arguments: "pause" }, { parts: [{ type: "text", text: "pause" }] })
+    const before = await readGoal(root)
+    assert.equal(before.status, "paused")
+    await hooks.event({ event: { type: "session.error", properties: { sessionID: "s1", error: { name: "APIError", data: { statusCode: 403, isRetryable: false, message: "You've reached your 5-hour usage limit." } } } } })
+    const after = await readGoal(root)
+    assert.equal(after.status, "paused")
+    assert.equal(after.stopReason, before.stopReason)
+    assert.equal(fake.abortCount, 0)
+  } finally {
+    await removeTempRoot(root)
+  }
+})

@@ -4,6 +4,15 @@ import { modelContextCompactionReason } from "./model-context.js"
 
 const USAGE_LIMIT_REASONS = new Set(["free_tier_limit", "account_rate_limit"])
 
+// Subscription providers may report an exhausted rolling quota as a terminal
+// APIError (notably HTTP 403) instead of OpenCode's retry action. HTTP status
+// alone is never enough: ordinary forbidden/auth errors must remain fatal.
+const PROVIDER_USAGE_LIMIT_PATTERNS = [
+  /(?:reached|exceeded|exhausted)\s+(?:your\s+|the\s+)?(?:\d+(?:\.\d+)?[- ](?:minute|hour|day|week|month)\s+)?(?:usage|token|request)\s+(?:limit|quota)/i,
+  /(?:usage|token|request)\s+(?:limit|quota)(?:\s+(?:has been|is))?\s+(?:reached|exceeded|exhausted)/i,
+  /\b(?:insufficient_quota|usage_limit_reached|usage_limit_exceeded)\b/i,
+]
+
 const AMBIGUOUS_CONTEXT_ERROR_PATTERNS = [
   /invalid[_ -]?request[_ -]?error/i,
   /request contains invalid parameters/i,
@@ -38,6 +47,7 @@ export interface HostSessionError {
   data?: {
     providerID?: string
     message?: string
+    responseBody?: string
     statusCode?: number
     isRetryable?: boolean
   }
@@ -97,9 +107,25 @@ export function hostUsageLimitReason(status: HostRetryStatus): string | undefine
   return `OpenCode provider usage limit${provider ? ` (${provider})` : ""}: ${detail}`
 }
 
+export function providerUsageLimitReason(error: HostSessionError): string | undefined {
+  if (!error || typeof error !== "object" || error.name !== "APIError") return undefined
+  const data = error.data ?? {}
+  const status = typeof data.statusCode === "number" ? data.statusCode : undefined
+  if (status !== undefined && ![402, 403, 429].includes(status)) return undefined
+  // Inspect only provider response fields, never the request or arbitrary event
+  // metadata (which can contain quoted quota text unrelated to this failure).
+  const detail = [data.message, data.responseBody].find((value) =>
+    typeof value === "string" && PROVIDER_USAGE_LIMIT_PATTERNS.some((pattern) => pattern.test(value)),
+  )
+  if (!detail) return undefined
+  const provider = concise(data.providerID, 80)
+  return `OpenCode provider usage limit${provider ? ` (${provider})` : ""}${status !== undefined ? ` HTTP ${status}` : ""}: ${concise(detail, 360)}`
+}
+
 export function markUsageLimited(goal: GoalState, reason: string, now = Date.now()): GoalState {
   if (goal.status !== "active") return goal
-  return { ...goal, status: "usage_limited", stopReason: concise(reason), updatedAt: now }
+  const { infrastructureRecovery: _infrastructureRecovery, skipNextStallCheck: _skipNextStallCheck, ...rest } = goal
+  return { ...rest, status: "usage_limited", stopReason: concise(reason), updatedAt: now }
 }
 
 export function markPromptOverflowRecovering(goal: GoalState, reason: string, now = Date.now()): GoalState {
@@ -115,7 +141,7 @@ export function markPromptOverflowRecovering(goal: GoalState, reason: string, no
 }
 
 export function fatalProviderReason(error: HostSessionError): string | undefined {
-  if (!error || typeof error !== "object") return undefined
+  if (!error || typeof error !== "object" || providerUsageLimitReason(error)) return undefined
   const name = String(error.name ?? "")
   const data = error.data ?? {}
   const message = concise(data.message, 360) || "Provider request failed"

@@ -10,6 +10,7 @@ import {
   markUsageLimited,
   pauseForFatalProviderError,
   providerPromptOverflowReason,
+  providerUsageLimitReason,
 } from "../dist/runtime/limits.js"
 import { closeObservedTurn } from "../dist/runtime/progress.js"
 import { parseGoalCommand } from "../dist/opencode/command.js"
@@ -180,4 +181,50 @@ test("fatal provider pause clears stale infrastructure retry metadata", () => {
   assert.equal(paused.status, "paused")
   assert.equal(paused.infrastructureRecovery, undefined)
   assert.equal(paused.skipNextStallCheck, undefined)
+})
+
+
+const KIMI_QUOTA_MESSAGE = "You've reached your 5-hour usage limit. Your quota will reset when the current 5-hour window ends. To continue now, purchase extra usage or upgrade your plan."
+
+test("Kimi terminal HTTP 403 usage quota is resumable, not a fatal provider error", () => {
+  const error = { name: "APIError", data: { providerID: "kimi-code-plan-cn", message: KIMI_QUOTA_MESSAGE, statusCode: 403, isRetryable: false } }
+  assert.match(providerUsageLimitReason(error), /provider usage limit.*kimi-code-plan-cn.*HTTP 403.*5-hour usage limit/i)
+  assert.equal(fatalProviderReason(error), undefined)
+})
+
+test("explicit quota extraction uses provider response body without converting ordinary auth or transient rate errors", () => {
+  const error = {
+    name: "APIError",
+    data: { message: "Forbidden", responseBody: JSON.stringify({ error: { message: KIMI_QUOTA_MESSAGE } }), statusCode: 403, isRetryable: false },
+  }
+  assert.match(providerUsageLimitReason(error), /5-hour usage limit/)
+  for (const statusCode of [402, 429]) {
+    assert.match(providerUsageLimitReason({ name: "APIError", data: { message: "usage quota exhausted", statusCode, isRetryable: false } }), /usage quota exhausted/)
+  }
+  assert.match(providerUsageLimitReason({ name: "APIError", data: { message: "insufficient_quota", statusCode: 429, isRetryable: false } }), /insufficient_quota/)
+  for (const error of [
+    { name: "APIError", data: { message: "Forbidden: invalid API key", statusCode: 403, isRetryable: false } },
+    { name: "APIError", data: { message: "Your plan does not allow access to this model", statusCode: 403, isRetryable: false } },
+    { name: "ProviderAuthError", data: { message: "invalid API key" } },
+    { name: "MessageAbortedError", data: { message: KIMI_QUOTA_MESSAGE } },
+    { name: "APIError", data: { message: "Too many requests. Please try again.", statusCode: 429, isRetryable: true } },
+    { name: "APIError", data: { message: "storage quota exceeded", statusCode: 403, isRetryable: false } },
+    { name: "APIError", data: { message: "Forbidden", statusCode: 403, isRetryable: false, requestBody: KIMI_QUOTA_MESSAGE } },
+  ]) assert.equal(providerUsageLimitReason(error), undefined)
+  assert.match(fatalProviderReason({ name: "APIError", data: { message: "Forbidden: invalid API key", statusCode: 403, isRetryable: false } }), /HTTP 403.*invalid API key/)
+})
+
+test("usage-limit transitions preserve user pauses and goal budgets while clearing obsolete infrastructure recovery", () => {
+  const original = createGoal({ sessionID: "s-quota", objective: "work", budget: { maxTurns: 20 } })
+  const stale = { ...original, infrastructureRecovery: { kind: "provider_retry", reason: "old retry", attempt: 1, startedAt: 1, nextRetryAt: 2 }, skipNextStallCheck: true }
+  const limited = markUsageLimited(stale, "quota reached", 100)
+  assert.equal(limited.status, "usage_limited")
+  assert.deepEqual(limited.budget, original.budget)
+  assert.deepEqual(limited.usage, original.usage)
+  assert.equal(limited.infrastructureRecovery, undefined)
+  assert.equal(limited.skipNextStallCheck, undefined)
+  for (const status of ["paused", "budget_limited", "complete", "blocked"]) {
+    const stopped = { ...original, status, stopReason: "user or goal stop" }
+    assert.strictEqual(markUsageLimited(stopped, "quota reached"), stopped)
+  }
 })

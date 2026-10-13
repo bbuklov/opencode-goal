@@ -9,6 +9,7 @@ import {
   markUsageLimited,
   pauseForFatalProviderError,
   providerPromptOverflowReason,
+  providerUsageLimitReason,
 } from "../runtime/limits.js"
 import { createGoalTransitionNotifier } from "./notify.js"
 import { showGoalToast } from "./toast.js"
@@ -231,6 +232,20 @@ export function installHostLimitHandling(input: PluginInput, hooks: PluginHooks)
     }
 
     if (sessionID && type === "session.error") {
+      // An explicit provider quota response wins over fatal 403 classification.
+      // Preserve a resumable usage_limited Goal for the launcher's reset wait.
+      const usageReason = providerUsageLimitReason(properties.error)
+      if (usageReason) {
+        const limited = await mutateFreshGoal(store, sessionID, (goal) => goal.status === "active" ? markUsageLimited(goal, usageReason) : null)
+        if (limited?.wrote) {
+          recoveringOverflow.delete(sessionID)
+          overflowAttempts.delete(sessionID)
+          await abortSession(input.client, sessionID)
+        }
+        await originalEvent(eventInput)
+        return
+      }
+
       const observedGoal = await store.load(sessionID)
       const overflowReason = providerPromptOverflowReason(properties.error, observedGoal ?? undefined)
       if (overflowReason) {
